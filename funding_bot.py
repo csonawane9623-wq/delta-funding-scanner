@@ -9,7 +9,7 @@ from datetime import datetime
 # =============================================================================
 BASE_URL = "https://api.india.delta.exchange"
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 ALERT_THRESHOLD = 0.8          # percentage (±0.8000%)
