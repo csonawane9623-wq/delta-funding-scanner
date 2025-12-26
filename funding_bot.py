@@ -9,7 +9,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Alert threshold in PERCENT (800 hundred = 0.8%)
-ALERT_THRESHOLD = 0.8
+ALERT_THRESHOLD = 0.0800
 
 session = requests.Session()
 session.headers.update({
