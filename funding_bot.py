@@ -62,12 +62,12 @@ def can_send(symbol, interval_hours, last_alerts):
 # TELEGRAM
 # =============================================================================
 def send_telegram(msg):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram credentials missing")
         return False
 
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         r = requests.post(
             url,
             data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
