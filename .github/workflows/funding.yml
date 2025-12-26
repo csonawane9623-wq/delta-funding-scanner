@@ -2,7 +2,7 @@ name: Delta Funding Rate Scanner
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # runs every 30 minutes
+    - cron: "*/15 * * * *"   # runs every 30 minutes
   workflow_dispatch:
 
 jobs:
