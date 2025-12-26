@@ -1,15 +1,19 @@
 import requests
-import urllib.parse
+import json
+import time
 import os
+from datetime import datetime
 
-# ================= CONFIG =================
+# =============================================================================
+# CONFIG
+# =============================================================================
 BASE_URL = "https://api.india.delta.exchange"
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Alert threshold in PERCENT (800 hundred = 0.8%)
-ALERT_THRESHOLD = 0.0800
+ALERT_THRESHOLD = 0.8          # percentage (±0.8000%)
+COOLDOWN_FILE = "last_alerts.json"
 
 session = requests.Session()
 session.headers.update({
@@ -17,52 +21,69 @@ session.headers.update({
     "Accept": "application/json"
 })
 
-# ================= TELEGRAM =================
-def send_telegram(message):
+# =============================================================================
+# UTILITIES
+# =============================================================================
+def format_ts(ts):
     try:
-        text = urllib.parse.quote(message)
-        url = (
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-            f"/sendMessage?chat_id={TELEGRAM_CHAT_ID}&text={text}"
-        )
-        r = requests.get(url, timeout=20)
-        if r.ok:
-            print("📨 Telegram alert sent")
-            return True
-    except Exception as e:
-        print("Telegram error:", e)
-
-    print("⚠️ Telegram alert failed")
-    return False
-
-
-# ================= FUNDING INTERVAL =================
-_interval_cache = {}
+        return datetime.fromtimestamp(ts / 1_000_000).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except:
+        return "N/A"
 
 def get_funding_interval(symbol):
-    if symbol in _interval_cache:
-        return _interval_cache[symbol]
-
     try:
         r = session.get(f"{BASE_URL}/v2/products/{symbol}", timeout=10)
         if r.ok and r.json().get("success"):
-            secs = (
-                r.json()["result"]
-                .get("product_specs", {})
-                .get("rate_exchange_interval")
-            )
-            if secs:
-                hours = int(secs / 3600)
-                _interval_cache[symbol] = hours
-                return hours
+            sec = r.json()["result"]["product_specs"].get("rate_exchange_interval")
+            return sec / 3600 if sec else None
     except:
         pass
-
     return None
 
+# =============================================================================
+# COOLDOWN LOGIC
+# =============================================================================
+def load_last_alerts():
+    if os.path.exists(COOLDOWN_FILE):
+        with open(COOLDOWN_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-# ================= MAIN =================
-def main():
+def save_last_alerts(data):
+    with open(COOLDOWN_FILE, "w") as f:
+        json.dump(data, f)
+
+def can_send(symbol, interval_hours, last_alerts):
+    now = time.time()
+    last = last_alerts.get(symbol, 0)
+    return (now - last) >= (interval_hours * 3600)
+
+# =============================================================================
+# TELEGRAM
+# =============================================================================
+def send_telegram(msg):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram credentials missing")
+        return False
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        r = requests.post(
+            url,
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=10
+        )
+        r.raise_for_status()
+        print("📨 Telegram alert sent")
+        return True
+    except Exception as e:
+        print(f"⚠️ Telegram skipped (network issue): {e}")
+        return False
+
+# =============================================================================
+# CORE LOGIC
+# =============================================================================
+def run():
     print("Delta Exchange – Funding Rate Scanner")
     print("=" * 70)
     print("Fetching perpetual futures data from Delta Exchange...\n")
@@ -70,76 +91,94 @@ def main():
     r = session.get(
         f"{BASE_URL}/v2/tickers",
         params={"contract_types": "perpetual_futures"},
-        timeout=20
+        timeout=10
     )
-    r.raise_for_status()
+
+    if not r.ok or not r.json().get("success"):
+        print("❌ Failed to fetch funding data")
+        return
 
     tickers = r.json()["result"]
-    funding_data = []
 
+    contracts = []
     for t in tickers:
         try:
-            rate = float(t.get("funding_rate"))
+            rate = float(t["funding_rate"])
         except:
             continue
 
-        funding_data.append({
+        contracts.append({
             "symbol": t["symbol"],
-            "rate": rate,                 # already in %
+            "funding_rate": rate,
             "mark": t.get("mark_price"),
-            "volume": t.get("volume")
+            "volume": t.get("volume", 0),
+            "timestamp": t.get("timestamp")
         })
 
-    funding_data.sort(key=lambda x: abs(x["rate"]), reverse=True)
-    top3 = funding_data[:3]
+    contracts.sort(key=lambda x: abs(x["funding_rate"]), reverse=True)
+    top3 = contracts[:3]
 
-    print("TOP 3 HIGHEST FUNDING CONTRACTS")
+    print("\nTOP 3 HIGHEST FUNDING CONTRACTS")
     print("=" * 70)
-
-    alert_candidates = []
 
     for c in top3:
         interval = get_funding_interval(c["symbol"])
-        interval_str = f"/{interval}h" if interval else ""
-
-        rate = c["rate"]
-        direction = "Shorts pay Longs" if rate < 0 else "Longs pay Shorts"
-
+        interval_str = f"/{int(interval)}h" if interval else ""
         print(
             f"Symbol: {c['symbol']:<10} | "
-            f"Funding: {rate:.4f}% {interval_str} | "
+            f"Funding: {c['funding_rate']:+.4f}% {interval_str} | "
             f"Mark: {c['mark']}"
         )
 
-        if abs(rate) >= ALERT_THRESHOLD:
-            alert_candidates.append({
-                **c,
-                "interval": interval_str,
-                "direction": direction
-            })
+    # =============================================================================
+    # ALERT FILTER
+    # =============================================================================
+    alert_candidates = [
+        c for c in top3 if abs(c["funding_rate"]) >= ALERT_THRESHOLD
+    ]
 
-    if alert_candidates:
-        msg = "🚨 DELTA FUNDING ALERT 🚨\n\n"
+    if not alert_candidates:
+        print(f"\nℹ️ No funding rate crossed ±{ALERT_THRESHOLD:.4f}% (Telegram alert skipped)")
+        return
 
-        for c in alert_candidates:
-            msg += (
-                f"{c['symbol']}\n"
-                f"Funding: {c['rate']:.4f}% {c['interval']}\n"
-                f"Direction: {c['direction']}\n"
-                f"Mark: {c['mark']}\n"
-                f"Volume: {c['volume']}\n"
-                f"https://www.delta.exchange/app/perpetual_futures/{c['symbol']}\n\n"
-            )
+    last_alerts = load_last_alerts()
+    final_alerts = []
 
-        send_telegram(msg)
-    else:
-        print(
-            f"\nℹ️ No funding rate crossed ±{ALERT_THRESHOLD:.2f}% "
-            f"(Telegram alert skipped)"
+    for c in alert_candidates:
+        interval = get_funding_interval(c["symbol"])
+        if not interval:
+            continue
+
+        if can_send(c["symbol"], interval, last_alerts):
+            final_alerts.append((c, interval))
+            last_alerts[c["symbol"]] = time.time()
+
+    if not final_alerts:
+        print("\nℹ️ Alert-worthy contracts are in cooldown period")
+        return
+
+    # =============================================================================
+    # BUILD MESSAGE
+    # =============================================================================
+    msg = "🚨 DELTA FUNDING ALERT 🚨\n\n"
+
+    for c, interval in final_alerts:
+        direction = "Shorts pay Longs" if c["funding_rate"] < 0 else "Longs pay Shorts"
+        msg += (
+            f"{c['symbol']}\n"
+            f"Funding: {c['funding_rate']:+.4f}% /{int(interval)}h\n"
+            f"Direction: {direction}\n"
+            f"Mark: {c['mark']}\n"
+            f"Volume: {c['volume']}\n"
+            f"https://www.delta.exchange/app/perpetual_futures/{c['symbol']}\n\n"
         )
 
-    print("\n✓ Bot execution completed")
+    if send_telegram(msg):
+        save_last_alerts(last_alerts)
 
-
+# =============================================================================
+# ENTRY
+# =============================================================================
 if __name__ == "__main__":
-    main()
+    run()
+    print("\n✓ Bot execution completed")
